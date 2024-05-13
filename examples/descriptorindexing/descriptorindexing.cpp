@@ -21,6 +21,7 @@ class VulkanExample : public VulkanExampleBase
 public:
 	// We will be dynamically indexing into an array of images
 	std::vector<vks::Texture2D> textures;
+	std::vector<vks::Texture2D> textures2;
 
 	vks::Buffer vertexBuffer;
 	vks::Buffer indexBuffer;
@@ -81,6 +82,9 @@ public:
 			for (auto& texture : textures) {
 				texture.destroy();
 			}
+			for (auto& texture : textures2) {
+				texture.destroy();
+			}
 			vkDestroyPipeline(device, pipeline, nullptr);
 			vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 			vkDestroyDescriptorSetLayout(device, descriptorSetLayout, nullptr);
@@ -107,7 +111,27 @@ public:
 				texture[i * 4 + 2] = rndDist(rndEngine);
 				texture[i * 4 + 3] = 255;
 			}
-			textures[i].fromBuffer(texture.data(), bufferSize, VK_FORMAT_R8G8B8A8_UNORM, dim, dim, vulkanDevice, queue, VK_FILTER_NEAREST);
+			textures[i].fromBuffer(texture.data(), bufferSize, VK_FORMAT_R8G8B8A8_UNORM, dim, dim, vulkanDevice, queue, VK_FILTER_NEAREST, VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+		}
+	}
+
+	void generateTextures2()
+	{
+		textures2.resize(32);
+		for (size_t i = 0; i < textures2.size(); i++) {
+			std::random_device rndDevice;
+			std::default_random_engine rndEngine(rndDevice());
+			std::uniform_int_distribution<> rndDist(50, UCHAR_MAX);
+			const int32_t dim = 3;
+			const size_t bufferSize = dim * dim * 4;
+			std::vector<uint8_t> texture(bufferSize);
+			for (size_t i = 0; i < dim * dim; i++) {
+				texture[i * 4]     = rndDist(rndEngine);
+				texture[i * 4 + 1] = rndDist(rndEngine);
+				texture[i * 4 + 2] = rndDist(rndEngine);
+				texture[i * 4 + 3] = 255;
+			}
+			textures2[i].fromBuffer(texture.data(), bufferSize, VK_FORMAT_R8G8B8A8_UNORM, dim, dim, vulkanDevice, queue, VK_FILTER_NEAREST, VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 		}
 	}
 
@@ -211,7 +235,8 @@ public:
 		// Descriptor pool
 		std::vector<VkDescriptorPoolSize> poolSizes = {
 			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),
-			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, static_cast<uint32_t>(textures.size()))
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1),
+			vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, static_cast<uint32_t>(textures.size()))
 		};
 		VkDescriptorPoolCreateInfo descriptorPoolInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, 2);
 #if (defined(VK_USE_PLATFORM_MACOS_MVK) || defined(VK_USE_PLATFORM_METAL_EXT))
@@ -226,18 +251,22 @@ public:
 			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT, 0),
 			// [POI] Binding 1 contains a texture array that is dynamically non-uniform sampled from in the fragment shader:
 			//	outFragColor = texture(textures[nonuniformEXT(inTexIndex)], inUV);
-			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT, 1, static_cast<uint32_t>(textures.size()))
+			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT, 1),
+			vks::initializers::descriptorSetLayoutBinding(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_SHADER_STAGE_FRAGMENT_BIT, 2, static_cast<uint32_t>(textures.size()))
 		};
 
 		// [POI] The fragment shader will be using an unsized array of samplers, which has to be marked with the VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT
 		VkDescriptorSetLayoutBindingFlagsCreateInfoEXT setLayoutBindingFlags{};
 		setLayoutBindingFlags.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO_EXT;
-		setLayoutBindingFlags.bindingCount = 2;
+		setLayoutBindingFlags.bindingCount = setLayoutBindings.size();
 		// Binding 0 is the vertex shader uniform buffer, which does not use indexing
-		// Binding 1 are the fragment shader images, which use indexing
+		// Binding 1 is the fragment shader image
+		// Binding 2 are the fragment shader samplers, which use indexing
 		// In the fragment shader:
-		//	layout (set = 0, binding = 1) uniform sampler2D textures[];
+		//	layout (set = 0, binding = 1) uniform sampler2D texture;
+		//	layout (set = 0, binding = 2) uniform sampler2D textures2[];
 		std::vector<VkDescriptorBindingFlagsEXT> descriptorBindingFlags = {
+			0,
 			0,
 			VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT_EXT
 		};
@@ -267,29 +296,43 @@ public:
 		
 		VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo, &descriptorSet));
 
-		std::vector<VkWriteDescriptorSet> writeDescriptorSets(2);
-
+		std::vector<VkWriteDescriptorSet> writeDescriptorSets(3);
 		writeDescriptorSets[0] = vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, &uniformBuffer.descriptor);
+
+		VkDescriptorImageInfo textureDescriptor2;
+		textureDescriptor2.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		textureDescriptor2.sampler = textures2[0].sampler;;
+		textureDescriptor2.imageView = textures2[0].view;
+
+		writeDescriptorSets[1] = {};
+		writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writeDescriptorSets[1].dstBinding = 1;
+		writeDescriptorSets[1].dstArrayElement = 0;
+		writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		writeDescriptorSets[1].descriptorCount = 1;
+		writeDescriptorSets[1].pBufferInfo = 0;
+		writeDescriptorSets[1].dstSet = descriptorSet;
+		writeDescriptorSets[1].pImageInfo = &textureDescriptor2;
 
 		// Image descriptors for the texture array
 		std::vector<VkDescriptorImageInfo> textureDescriptors(textures.size());
 		for (size_t i = 0; i < textures.size(); i++) {
-			textureDescriptors[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-			textureDescriptors[i].sampler = textures[i].sampler;;
+			textureDescriptors[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			textureDescriptors[i].sampler = textures[i].sampler;
 			textureDescriptors[i].imageView = textures[i].view;
 		}
 
 		// [POI] Second and final descriptor is a texture array
 		// Unlike an array texture, these are adressed like typical arrays
-		writeDescriptorSets[1] = {};
-		writeDescriptorSets[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writeDescriptorSets[1].dstBinding = 1;
-		writeDescriptorSets[1].dstArrayElement = 0;
-		writeDescriptorSets[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		writeDescriptorSets[1].descriptorCount = static_cast<uint32_t>(textures.size());
-		writeDescriptorSets[1].pBufferInfo = 0;
-		writeDescriptorSets[1].dstSet = descriptorSet;
-		writeDescriptorSets[1].pImageInfo = textureDescriptors.data();
+		writeDescriptorSets[2] = {};
+		writeDescriptorSets[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writeDescriptorSets[2].dstBinding = 2;
+		writeDescriptorSets[2].dstArrayElement = 0;
+		writeDescriptorSets[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		writeDescriptorSets[2].descriptorCount = static_cast<uint32_t>(textures.size());
+		writeDescriptorSets[2].pBufferInfo = 0;
+		writeDescriptorSets[2].dstSet = descriptorSet;
+		writeDescriptorSets[2].pImageInfo = textureDescriptors.data();
 
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, nullptr);
 	}
@@ -402,6 +445,7 @@ public:
 	{
 		VulkanExampleBase::prepare();
 		generateTextures();
+		generateTextures2();
 		generateCubes();
 		prepareUniformBuffers();
 		setupDescriptors();
